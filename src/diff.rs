@@ -5,6 +5,8 @@ use std::{
 
 use crate::tree::{XNode, XTree};
 use md5::Digest;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 trait Concat {
     fn concat(self, other: Self) -> Self;
@@ -62,6 +64,20 @@ impl Display for Edit<'_, '_, '_> {
 
 type Diff<'a, 'tree1, 'tree2> = Vec<Edit<'a, 'tree1, 'tree2>>;
 
+#[cfg(not(feature = "rayon"))]
+macro_rules! iter {
+    ($iter:expr) => {
+        $iter.iter()
+    };
+}
+
+#[cfg(feature = "rayon")]
+macro_rules! iter {
+    ($iter:expr) => {
+        $iter.par_iter()
+    };
+}
+
 /// Calculate the difference between two XML trees, represented by the minum edit operations to transform `tree1` to `tree2`.
 pub fn diff<'a, 'doc1, 'doc2>(
     tree1: &'doc1 XTree<'doc1>,
@@ -85,14 +101,10 @@ pub fn diff<'a, 'doc1, 'doc2>(
             }];
         }
 
-        let mut iht1: HashMap<_, _> = node1
-            .children()
-            .iter()
+        let mut iht1: HashMap<_, _> = iter!(node1.children())
             .map(|n| (*ht1.get(&n.id().to_string()).unwrap(), *n))
             .collect();
-        let mut iht2: HashMap<_, _> = node2
-            .children()
-            .iter()
+        let mut iht2: HashMap<_, _> = iter!(node2.children())
             .map(|n| (*ht2.get(&n.id().to_string()).unwrap(), *n))
             .collect();
         let children_hashes1: HashSet<_> = iht1.keys().copied().collect();
@@ -103,13 +115,21 @@ pub fn diff<'a, 'doc1, 'doc2>(
         let mut remaining_children1: HashSet<_> = iht1.into_values().collect();
         let mut remaining_children2: HashSet<_> = iht2.into_values().collect();
         let mut diff_pairs = Vec::new();
-        for n1 in &remaining_children1 {
-            for n2 in &remaining_children2 {
-                if n1.signature() == n2.signature() {
-                    diff_pairs.push((*n1, *n2, diff_node(*n1, ht1, *n2, ht2)));
-                }
-            }
-        }
+        diff_pairs.extend(
+            iter!(remaining_children1)
+                .flat_map(|n1| {
+                    iter!(remaining_children2)
+                        .flat_map(|n2| {
+                            if n1.signature() == n2.signature() {
+                                Some((*n1, *n2, diff_node(*n1, ht1, *n2, ht2)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        );
         diff_pairs.sort_by_key(|item| item.2.len());
         let mut diff = Vec::new();
         for (n1, n2, mut d) in diff_pairs {
@@ -119,15 +139,19 @@ pub fn diff<'a, 'doc1, 'doc2>(
                 remaining_children2.remove(&n2);
             }
         }
-        for n1 in remaining_children1 {
-            diff.push(Edit::Delete(n1));
-        }
-        for n2 in remaining_children2 {
-            diff.push(Edit::Insert {
-                child_node: n2,
-                to_node: node1,
-            });
-        }
+        diff.extend(
+            iter!(remaining_children1)
+                .map(|n1| Edit::Delete(*n1))
+                .collect::<Vec<_>>(),
+        );
+        diff.extend(
+            iter!(remaining_children2)
+                .map(|n2| Edit::Insert {
+                    child_node: *n2,
+                    to_node: node1,
+                })
+                .collect::<Vec<_>>(),
+        );
         diff
     }
     if tree1.root().signature() != tree2.root().signature() {
